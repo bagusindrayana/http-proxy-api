@@ -22,7 +22,7 @@ app.all("/proxy", async (req, res) => {
     const response = await axios({
       url: target,
       method: req.method,
-      headers: { ...req.headers, host: undefined, "Content-Length": undefined,"Transfer-Encoding": undefined },
+      headers: { ...req.headers, host: undefined },
       data: req.body,
       validateStatus: () => true,
     });
