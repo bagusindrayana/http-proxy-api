@@ -8,8 +8,11 @@ const PORT = process.env.PORT || 3000;
 // Enable CORS for all routes
 app.use(cors());
 
-// Parse JSON bodies
-app.use(express.json());
+// Parse request bodies - support multiple formats
+app.use(express.json({ limit: '10mb' })); // JSON bodies
+app.use(express.urlencoded({ extended: true, limit: '10mb' })); // Form data
+app.use(express.raw({ type: 'application/octet-stream', limit: '10mb' })); // Binary data
+app.use(express.text({ type: 'text/*', limit: '10mb' })); // Text data
 
 // Log incoming requests
 app.use((req, res, next) => {
@@ -23,6 +26,47 @@ app.get('/health', (req, res) => {
     status: 'OK', 
     timestamp: new Date().toISOString(),
     uptime: process.uptime()
+  });
+});
+
+// Test endpoints for different HTTP methods with bodies
+app.post('/test/echo', (req, res) => {
+  res.json({
+    message: 'Echo test endpoint',
+    method: req.method,
+    headers: req.headers,
+    body: req.body,
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.put('/test/echo', (req, res) => {
+  res.json({
+    message: 'Echo test endpoint',
+    method: req.method,
+    headers: req.headers,
+    body: req.body,
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.delete('/test/echo', (req, res) => {
+  res.json({
+    message: 'Echo test endpoint', 
+    method: req.method,
+    headers: req.headers,
+    body: req.body,
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.patch('/test/echo', (req, res) => {
+  res.json({
+    message: 'Echo test endpoint',
+    method: req.method,
+    headers: req.headers,
+    body: req.body,
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -70,13 +114,45 @@ app.use('/proxy', (req, res, next) => {
       const finalUrl = baseUrl + targetPath + req.url.replace(/^\/proxy/, '');
       console.log(`Proxying ${req.method} ${req.originalUrl} to ${finalUrl}`);
       
-      // Forward original headers
-      if (req.body && req.method !== 'GET' && req.method !== 'HEAD') {
-        const bodyData = JSON.stringify(req.body);
-        proxyReq.setHeader('Content-Type', 'application/json');
+      // Handle request body for POST, PUT, PATCH, DELETE
+      if (req.body && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+        let bodyData;
+        let contentType = req.get('Content-Type') || 'application/json';
+        
+        if (Buffer.isBuffer(req.body)) {
+          // Binary data
+          bodyData = req.body;
+        } else if (typeof req.body === 'string') {
+          // Text data
+          bodyData = req.body;
+        } else {
+          // JSON data
+          bodyData = JSON.stringify(req.body);
+          contentType = 'application/json';
+        }
+        
+        // Set appropriate headers
+        proxyReq.setHeader('Content-Type', contentType);
         proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+        
+        // Write the body
         proxyReq.write(bodyData);
+        
+        console.log(`📝 ${req.method} body forwarded:`, {
+          contentType,
+          bodySize: Buffer.byteLength(bodyData),
+          bodyPreview: typeof bodyData === 'string' ? bodyData.substring(0, 200) + '...' : '[Binary Data]'
+        });
       }
+      
+      // Forward other important headers
+      const headersToForward = ['authorization', 'user-agent', 'accept', 'accept-language', 'accept-encoding'];
+      headersToForward.forEach(header => {
+        const value = req.get(header);
+        if (value) {
+          proxyReq.setHeader(header, value);
+        }
+      });
     },
     onProxyRes: (proxyRes, req, res) => {
       console.log(`Response from ${baseUrl}${targetPath}: ${proxyRes.statusCode}`);
@@ -144,13 +220,11 @@ app.use('/auth-proxy', (req, res, next) => {
 
   const baseUrl = `${targetUrl.protocol}//${targetUrl.host}`;
   const targetPath = targetUrl.pathname;
-
   const proxy = createProxyMiddleware({
     target: baseUrl,
     changeOrigin: true,
     pathRewrite: (path, req) => {
-      const cleanPath = path.replace(/^\/auth-proxy/, '');
-      return targetPath + cleanPath;
+      return targetPath;
     },
     onProxyReq: (proxyReq, req, res) => {
       // Add authentication header if provided
@@ -158,9 +232,30 @@ app.use('/auth-proxy', (req, res, next) => {
         proxyReq.setHeader('Authorization', authToken.startsWith('Bearer ') ? authToken : `Bearer ${authToken}`);
       }
       
-      // Forward other headers
+      // Handle request body for POST, PUT, PATCH, DELETE
+      if (req.body && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) {
+        let bodyData;
+        let contentType = req.get('Content-Type') || 'application/json';
+        
+        if (Buffer.isBuffer(req.body)) {
+          bodyData = req.body;
+        } else if (typeof req.body === 'string') {
+          bodyData = req.body;
+        } else {
+          bodyData = JSON.stringify(req.body);
+          contentType = 'application/json';
+        }
+        
+        proxyReq.setHeader('Content-Type', contentType);
+        proxyReq.setHeader('Content-Length', Buffer.byteLength(bodyData));
+        proxyReq.write(bodyData);
+        
+        console.log(`📝 Auth ${req.method} body forwarded (${Buffer.byteLength(bodyData)} bytes)`);
+      }
+      
+      // Forward other headers (except host and authorization which we handle separately)
       Object.keys(req.headers).forEach(key => {
-        if (key.toLowerCase() !== 'host') {
+        if (!['host', 'authorization', 'content-length', 'content-type'].includes(key.toLowerCase())) {
           proxyReq.setHeader(key, req.headers[key]);
         }
       });
@@ -205,10 +300,13 @@ app.listen(PORT, () => {
   console.log(`   • /api/jsonplaceholder - JSONPlaceholder API`);
   console.log(`   • /api/httpbin - HTTPBin testing API`);
   console.log(`   • /api/github - GitHub API`);
-  console.log(`\n📝 Examples with subfolders:`);
-  console.log(`   • /proxy?target=https://api.github.com/repos/microsoft/vscode`);
-  console.log(`   • /proxy?target=https://httpbin.org/anything/test/path`);
-  console.log(`   • /auth-proxy?target=https://api.example.com/v1/users&token=your_token`);
+  console.log(`\n📝 Test endpoints (POST/PUT/DELETE/PATCH with body):`);
+  console.log(`   • POST/PUT/DELETE/PATCH http://localhost:${PORT}/test/echo`);
+  console.log(`\n🌐 Examples with request bodies:`);
+  console.log(`   • POST /proxy?target=https://httpbin.org/post`);
+  console.log(`   • PUT /proxy?target=https://httpbin.org/put`);
+  console.log(`   • DELETE /proxy?target=https://httpbin.org/delete`);
+  console.log(`\n📊 Supported body formats: JSON, Form Data, Text, Binary`);
 });
 
 module.exports = app;
